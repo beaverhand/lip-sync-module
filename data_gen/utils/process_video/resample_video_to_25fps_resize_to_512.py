@@ -11,14 +11,36 @@ def get_video_infos(video_path):
     total_frames = int(vid_cap.get(cv2.CAP_PROP_FRAME_COUNT))
     return {'height': height, 'width': width, 'fps': fps, 'total_frames':total_frames}
 
-def extract_img_job(video_name:str):
+def extract_img_job(video_name:str, use_dynamic_crop:bool=True):
     out_path = video_name.replace("/video_raw/","/video/",1)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     ffmpeg_path = "/usr/bin/ffmpeg"
     vid_info = get_video_infos(video_name)
-    assert vid_info['width'] == vid_info['height']
-    cmd = f'{ffmpeg_path} -i {video_name} -vf fps={25},scale=w=512:h=512 -q:v 1 -c:v libx264 -pix_fmt yuv420p -b:v 2000k -v quiet -y {out_path}'
-    os.system(cmd)
+
+    if vid_info['width'] == vid_info['height']:
+        # Already square, just resize
+        cmd = f'{ffmpeg_path} -i {video_name} -vf fps={25},scale=w=512:h=512 -q:v 1 -c:v libx264 -pix_fmt yuv420p -b:v 2000k -v quiet -y {out_path}'
+        os.system(cmd)
+    elif use_dynamic_crop:
+        # Use face detection for dynamic cropping
+        try:
+            from data_gen.utils.process_video.crop_utils import preprocess_video_for_geneface
+            preprocess_video_for_geneface(
+                video_name, out_path,
+                target_size=512, target_fps=25.0,
+                use_face_detection=True, margin=0.3
+            )
+        except Exception as e:
+            print(f"Dynamic cropping failed for {video_name}: {e}, falling back to center crop")
+            # Fall back to center crop
+            wh = min(vid_info['width'], vid_info['height'])
+            cmd = f'{ffmpeg_path} -i {video_name} -vf fps={25},crop={wh}:{wh},scale=w=512:h=512 -q:v 1 -c:v libx264 -pix_fmt yuv420p -b:v 2000k -v quiet -y {out_path}'
+            os.system(cmd)
+    else:
+        # Simple center crop
+        wh = min(vid_info['width'], vid_info['height'])
+        cmd = f'{ffmpeg_path} -i {video_name} -vf fps={25},crop={wh}:{wh},scale=w=512:h=512 -q:v 1 -c:v libx264 -pix_fmt yuv420p -b:v 2000k -v quiet -y {out_path}'
+        os.system(cmd)
 
 def extract_img_job_crop(video_name:str):
     out_path = video_name.replace("/video_raw/","/video/",1)
