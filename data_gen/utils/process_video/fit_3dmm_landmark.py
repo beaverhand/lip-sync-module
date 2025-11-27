@@ -129,14 +129,16 @@ def set_requires_grad(tensor_list):
 
 @torch.enable_grad()
 def fit_3dmm_for_a_video(
-    video_name, 
+    video_name,
     nerf=False, # use the file name convention for GeneFace++
-    id_mode='global', 
-    debug=False, 
+    id_mode='global',
+    debug=False,
     keypoint_mode='mediapipe',
     large_yaw_threshold=9999999.9,
-    save=True
-) -> bool: # True: good, False: bad 
+    save=True,
+    use_dynamic_crop=True,  # NEW: enable dynamic face cropping for arbitrary videos
+    crop_margin=0.3,        # NEW: margin around detected face
+) -> bool: # True: good, False: bad
     assert video_name.endswith(".mp4"), "this function only support video as input"
     if id_mode == 'global':
         LAMBDA_REG_ID = 0.2
@@ -153,7 +155,66 @@ def fit_3dmm_for_a_video(
 
     frames = read_video_to_frames(video_name) # [T, H, W, 3]
     img_h, img_w = frames.shape[1], frames.shape[2]
-    assert img_h == img_w
+
+    # Handle non-square videos with dynamic face cropping
+    crop_metadata = None
+    if img_h != img_w:
+        if use_dynamic_crop:
+            print(f"Non-square video detected ({img_w}x{img_h}), applying dynamic face cropping...")
+            try:
+                from data_gen.utils.process_video.face_detector import FaceDetector, extract_face_crops
+
+                # Detect and track face
+                detector = FaceDetector()
+                face_bboxes = detector.track_faces(frames)
+                crop_region = detector.compute_stable_crop_region(
+                    face_bboxes, img_w, img_h, margin=crop_margin, target_size=512
+                )
+
+                # Store crop metadata for later compositing
+                crop_metadata = {
+                    'original_width': img_w,
+                    'original_height': img_h,
+                    'crop_x1': crop_region.x1,
+                    'crop_y1': crop_region.y1,
+                    'crop_x2': crop_region.x2,
+                    'crop_y2': crop_region.y2,
+                    'face_bboxes': [{'x1': b.x1, 'y1': b.y1, 'x2': b.x2, 'y2': b.y2, 'confidence': b.confidence} for b in face_bboxes]
+                }
+
+                # Extract face crops (512x512)
+                frames = extract_face_crops(frames, crop_region, target_size=512)
+                img_h, img_w = 512, 512
+                print(f"Cropped to face region: ({crop_region.x1}, {crop_region.y1}) - ({crop_region.x2}, {crop_region.y2})")
+            except Exception as e:
+                print(f"Dynamic cropping failed: {e}, falling back to center crop")
+                # Fall back to center crop
+                size = min(img_h, img_w)
+                y_start = (img_h - size) // 2
+                x_start = (img_w - size) // 2
+                frames = frames[:, y_start:y_start+size, x_start:x_start+size, :]
+                import cv2
+                frames = np.array([cv2.resize(f, (512, 512), interpolation=cv2.INTER_LANCZOS4) for f in frames])
+                img_h, img_w = 512, 512
+                crop_metadata = {
+                    'original_width': img_w,
+                    'original_height': img_h,
+                    'crop_x1': x_start,
+                    'crop_y1': y_start,
+                    'crop_x2': x_start + size,
+                    'crop_y2': y_start + size,
+                }
+        else:
+            # Simple center crop for backward compatibility
+            size = min(img_h, img_w)
+            y_start = (img_h - size) // 2
+            x_start = (img_w - size) // 2
+            frames = frames[:, y_start:y_start+size, x_start:x_start+size, :]
+            import cv2
+            frames = np.array([cv2.resize(f, (512, 512), interpolation=cv2.INTER_LANCZOS4) for f in frames])
+            img_h, img_w = 512, 512
+            print(f"Applied center crop to make video square: {img_w}x{img_h}")
+
     num_frames = len(frames)
 
     if nerf: # single video
@@ -455,7 +516,14 @@ def fit_3dmm_for_a_video(
     #     return False
 
     if save:
-        np.save(out_name, coeff_dict, allow_pickle=True) 
+        np.save(out_name, coeff_dict, allow_pickle=True)
+
+        # Save crop metadata for arbitrary video compositing
+        if crop_metadata is not None:
+            crop_metadata_name = out_name.replace("_coeff_fit_mp.npy", "_crop_metadata.npy").replace("/coeff_fit_mp.npy", "/crop_metadata.npy")
+            np.save(crop_metadata_name, crop_metadata, allow_pickle=True)
+            print(f"Saved crop metadata to {crop_metadata_name}")
+
     return coeff_dict
 
 def out_exist_job(vid_name):
